@@ -1,20 +1,29 @@
 #!/bin/bash
 
-set -ex
+set -e
 
 cd $(dirname $0)
 
-if [ "$1" = "--release" ]; then
-  CFLAGS="-Wall"
-else
-  # To get debugging symbols in PHP itself, build PHP with:
-  #   $ ./configure --enable-debug CFLAGS='-g -O0'
-  CFLAGS="-g -O0 -Wall"
+../prepare_c_extension.sh
+pushd  ../ext/google/protobuf > /dev/null
+
+CONFIGURE_OPTIONS=("./configure" "--with-php-config=$(which php-config)")
+
+if [ "$1" != "--release" ]; then
+  CONFIGURE_OPTIONS+=("CFLAGS=-g -O0 -Wall -DPBPHP_ENABLE_ASSERTS")
 fi
 
-pushd  ../ext/google/protobuf
-phpize --clean
-rm -f configure.in configure.ac
-php make-preload.php
-phpize && ./configure --with-php-config=$(which php-config) CFLAGS="$CFLAGS" && make
-popd
+FINGERPRINT="$(sha256sum $(which php)) ${CONFIGURE_OPTIONS[@]}"
+
+# If the PHP interpreter we are building against or the arguments
+# have changed, we must regenerated the Makefile.
+if [[ ! -f BUILD_STAMP ]] || [[ "$(cat BUILD_STAMP)" != "$FINGERPRINT" ]]; then
+  phpize --clean
+  rm -f configure.in configure.ac
+  phpize
+  "${CONFIGURE_OPTIONS[@]}"
+  echo "$FINGERPRINT" > BUILD_STAMP
+fi
+
+make
+popd > /dev/null

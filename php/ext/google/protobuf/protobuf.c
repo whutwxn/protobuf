@@ -35,7 +35,6 @@
 
 #include "arena.h"
 #include "array.h"
-#include "bundled_php.h"
 #include "convert.h"
 #include "def.h"
 #include "map.h"
@@ -75,6 +74,12 @@ ZEND_BEGIN_MODULE_GLOBALS(protobuf)
   // Name cache (see interface in protobuf.h).
   HashTable name_msg_cache;
   HashTable name_enum_cache;
+
+  // An array of descriptor objects constructed during this request. These are
+  // logically referenced by the corresponding class entry, but since we can't
+  // actually write a class entry destructor, we reference them here, to be
+  // destroyed on request shutdown.
+  HashTable descriptors;
 ZEND_END_MODULE_GLOBALS(protobuf)
 
 ZEND_DECLARE_MODULE_GLOBALS(protobuf)
@@ -162,13 +167,10 @@ static PHP_RINIT_FUNCTION(protobuf) {
   upb_symtab *symtab = PROTOBUF_G(saved_symtab);
   DescriptorPool_CreateWithSymbolTable(&PROTOBUF_G(generated_pool), symtab);
 
-  // Set up autoloader for bundled sources.
-  zend_eval_string("spl_autoload_register('protobuf_internal_loadbundled');",
-                   NULL, "autoload_register.php");
-
   zend_hash_init(&PROTOBUF_G(object_cache), 64, NULL, NULL, 0);
   zend_hash_init(&PROTOBUF_G(name_msg_cache), 64, NULL, NULL, 0);
   zend_hash_init(&PROTOBUF_G(name_enum_cache), 64, NULL, NULL, 0);
+  zend_hash_init(&PROTOBUF_G(descriptors), 64, NULL, ZVAL_PTR_DTOR, 0);
 
   return SUCCESS;
 }
@@ -189,41 +191,23 @@ static PHP_RSHUTDOWN_FUNCTION(protobuf) {
   zend_hash_destroy(&PROTOBUF_G(object_cache));
   zend_hash_destroy(&PROTOBUF_G(name_msg_cache));
   zend_hash_destroy(&PROTOBUF_G(name_enum_cache));
+  zend_hash_destroy(&PROTOBUF_G(descriptors));
 
   return SUCCESS;
 }
 
 // -----------------------------------------------------------------------------
-// Bundled PHP sources
-// -----------------------------------------------------------------------------
-
-// We bundle PHP sources for well-known types into the C extension. There is no
-// need to implement these in C.
-
-static PHP_FUNCTION(protobuf_internal_loadbundled) {
-  char *name = NULL;
-  zend_long size;
-  BundledPhp_File *file;
-
-  if (zend_parse_parameters(ZEND_NUM_ARGS(), "s", &name, &size) != SUCCESS) {
-    return;
-  }
-
-  for (file = bundled_files; file->filename; file++) {
-    if (strcmp(file->filename, name) == 0) {
-      zend_eval_string((char*)file->contents, NULL, (char*)file->filename);
-      return;
-    }
-  }
-}
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_load_bundled_source, 0, 0, 1)
-  ZEND_ARG_INFO(0, class_name)
-ZEND_END_ARG_INFO()
-
-// -----------------------------------------------------------------------------
 // Object Cache.
 // -----------------------------------------------------------------------------
+
+void Descriptors_Add(zend_object *desc) {
+  // The hash table will own a ref (it will destroy it when the table is
+  // destroyed), but for some reason the insert operation does not add a ref, so
+  // we do that here with ZVAL_OBJ_COPY().
+  zval zv;
+  ZVAL_OBJ_COPY(&zv, desc);
+  zend_hash_next_index_insert(&PROTOBUF_G(descriptors), &zv);
+}
 
 void ObjCache_Add(const void *upb_obj, zend_object *php_obj) {
   zend_ulong k = (zend_ulong)upb_obj;
@@ -243,8 +227,7 @@ bool ObjCache_Get(const void *upb_obj, zval *val) {
   zend_object *obj = zend_hash_index_find_ptr(&PROTOBUF_G(object_cache), k);
 
   if (obj) {
-    GC_ADDREF(obj);
-    ZVAL_OBJ(val, obj);
+    ZVAL_OBJ_COPY(val, obj);
     return true;
   } else {
     ZVAL_NULL(val);
@@ -273,11 +256,18 @@ const upb_msgdef *NameMap_GetMessage(zend_class_entry *ce) {
       zend_hash_find_ptr(&PROTOBUF_G(name_msg_cache), ce->name);
 
   if (!ret && ce->create_object) {
+#if PHP_VERSION_ID < 80000
     zval tmp;
     zval zv;
     ZVAL_OBJ(&tmp, ce->create_object(ce));
     zend_call_method_with_0_params(&tmp, ce, NULL, "__construct", &zv);
     zval_ptr_dtor(&tmp);
+#else
+    zval zv;
+    zend_object *tmp = ce->create_object(ce);
+    zend_call_method_with_0_params(tmp, ce, NULL, "__construct", &zv);
+    OBJ_RELEASE(tmp);
+#endif
     zval_ptr_dtor(&zv);
     ret = zend_hash_find_ptr(&PROTOBUF_G(name_msg_cache), ce->name);
   }
@@ -296,7 +286,6 @@ const upb_enumdef *NameMap_GetEnum(zend_class_entry *ce) {
 // -----------------------------------------------------------------------------
 
 zend_function_entry protobuf_functions[] = {
-  PHP_FE(protobuf_internal_loadbundled, arginfo_load_bundled_source)
   ZEND_FE_END
 };
 
@@ -324,6 +313,7 @@ static PHP_MINIT_FUNCTION(protobuf) {
 }
 
 static PHP_MSHUTDOWN_FUNCTION(protobuf) {
+  UNREGISTER_INI_ENTRIES();
   return SUCCESS;
 }
 
@@ -338,7 +328,7 @@ zend_module_entry protobuf_module_entry = {
   PHP_RINIT(protobuf),      // request shutdown
   PHP_RSHUTDOWN(protobuf),  // request shutdown
   NULL,                     // extension info
-  "3.13.0",                 // extension version
+  PHP_PROTOBUF_VERSION,     // extension version
   PHP_MODULE_GLOBALS(protobuf),  // globals descriptor
   PHP_GINIT(protobuf),      // globals ctor
   PHP_GSHUTDOWN(protobuf),  // globals dtor

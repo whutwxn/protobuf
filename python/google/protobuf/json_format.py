@@ -286,6 +286,8 @@ class _Printer(object):
     elif field.cpp_type == descriptor.FieldDescriptor.CPPTYPE_ENUM:
       if self.use_integers_for_enums:
         return value
+      if field.enum_type.full_name == 'google.protobuf.NullValue':
+        return None
       enum_value = field.enum_type.values_by_number.get(value, None)
       if enum_value is not None:
         return enum_value.name
@@ -529,8 +531,9 @@ class _Parser(object):
                            '"{1}" fields.'.format(
                                message.DESCRIPTOR.full_name, name))
         names.append(name)
+        value = js[name]
         # Check no other oneof field is parsed.
-        if field.containing_oneof is not None:
+        if field.containing_oneof is not None and value is not None:
           oneof_name = field.containing_oneof.name
           if oneof_name in names:
             raise ParseError('Message type "{0}" should not have multiple '
@@ -538,12 +541,14 @@ class _Parser(object):
                                  message.DESCRIPTOR.full_name, oneof_name))
           names.append(oneof_name)
 
-        value = js[name]
         if value is None:
           if (field.cpp_type == descriptor.FieldDescriptor.CPPTYPE_MESSAGE
               and field.message_type.full_name == 'google.protobuf.Value'):
             sub_message = getattr(message, field.name)
             sub_message.null_value = 0
+          elif (field.cpp_type == descriptor.FieldDescriptor.CPPTYPE_ENUM
+                and field.enum_type.full_name == 'google.protobuf.NullValue'):
+            setattr(message, field.name, 0)
           else:
             message.ClearField(field.name)
           continue

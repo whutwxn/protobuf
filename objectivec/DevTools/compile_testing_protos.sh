@@ -1,14 +1,33 @@
 #!/bin/bash -eu
 # Invoked by the Xcode projects to build the protos needed for the unittests.
 
-readonly OUTPUT_DIR="${PROJECT_DERIVED_FILE_DIR}/protos"
-
 # -----------------------------------------------------------------------------
 # Helper for bailing.
 die() {
   echo "Error: $1"
   exit 2
 }
+
+# -----------------------------------------------------------------------------
+# Parameters.
+if (( $# > 1 )); then
+  die "Script takes only one parameter: $#"
+fi
+
+if (( $# == 1 )); then
+  case "$1" in
+    "--elide_message_metadata")
+      readonly ELIDE_MESSAGE_METADATA_OPTION="--objc_opt=elide_message_metadata"
+      readonly OUTPUT_DIR="${PROJECT_DERIVED_FILE_DIR}/elided/protos"
+      ;;
+    *)
+      die "Unknown option: $1"
+      ;;
+  esac
+else
+  readonly ELIDE_MESSAGE_METADATA_OPTION=""
+  readonly OUTPUT_DIR="${PROJECT_DERIVED_FILE_DIR}/normal/protos"
+fi
 
 # -----------------------------------------------------------------------------
 # What to do.
@@ -95,7 +114,7 @@ cd "${SRCROOT}/.."
 # -----------------------------------------------------------------------------
 RUN_PROTOC=no
 
-# Check to if all the output files exist (incase a new one got added).
+# Check to if all the output files exist (in case a new one got added).
 
 for PROTO_FILE in "${CORE_PROTO_FILES[@]}" "${OBJC_TEST_PROTO_FILES[@]}"; do
   DIR=${PROTO_FILE%/*}
@@ -157,6 +176,7 @@ compile_protos() {
     --proto_path=src/google/protobuf/          \
     --proto_path=src                           \
     --experimental_allow_proto3_optional       \
+    ${ELIDE_MESSAGE_METADATA_OPTION}           \
     "$@"
 }
 
